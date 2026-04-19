@@ -1,8 +1,7 @@
-# app.py - Main Streamlit Application
+# app.py - Main Streamlit Application with improved compatibility
 
 import streamlit as st
 import cv2
-import face_recognition
 import pandas as pd
 import pickle
 import os
@@ -10,6 +9,7 @@ from datetime import datetime
 import numpy as np
 from PIL import Image
 import tempfile
+import sys
 
 # Page configuration
 st.set_page_config(
@@ -21,6 +21,10 @@ st.set_page_config(
 # Title and description
 st.title("📸 Smart Attendance System using Face Recognition")
 st.markdown("---")
+
+# Check Python version and show warning if needed
+if sys.version_info >= (3, 12):
+    st.warning("⚠️ You're using Python 3.12 or higher. Some packages might have compatibility issues. If you encounter errors, please use Python 3.10 or 3.11 for better compatibility.")
 
 # Sidebar for navigation
 st.sidebar.title("Navigation")
@@ -37,15 +41,28 @@ if 'student_encodings' not in st.session_state:
 if 'student_names' not in st.session_state:
     st.session_state.student_names = None
 
+# Try to import face_recognition with error handling
+try:
+    import face_recognition
+    FACE_RECOGNITION_AVAILABLE = True
+except ImportError as e:
+    FACE_RECOGNITION_AVAILABLE = False
+    st.error(f"Face recognition library not available: {str(e)}")
+    st.info("Please make sure all dependencies are installed correctly. Try restarting the app.")
+
 def train_model(images_folder):
     """Train the face recognition model"""
+    if not FACE_RECOGNITION_AVAILABLE:
+        st.error("Face recognition library is not available")
+        return False, None, None
+    
     try:
         student_encodings = []
         student_names = []
         
         # Get all image files
         image_files = [f for f in os.listdir(images_folder) 
-                      if f.endswith(('.jpg', '.jpeg', '.png'))]
+                      if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
         
         if len(image_files) == 0:
             st.error("No images found in the selected folder!")
@@ -58,19 +75,29 @@ def train_model(images_folder):
             status_text.text(f"Processing {filename}...")
             img_path = os.path.join(images_folder, filename)
             
-            # Load and resize image
-            image = face_recognition.load_image_file(img_path)
-            image = cv2.resize(image, (0, 0), fx=0.5, fy=0.5)
+            try:
+                # Load and resize image
+                image = face_recognition.load_image_file(img_path)
+                
+                # Resize for faster processing
+                if image.shape[1] > 1000:  # If width > 1000 pixels
+                    scale_factor = 1000 / image.shape[1]
+                    new_width = int(image.shape[1] * scale_factor)
+                    new_height = int(image.shape[0] * scale_factor)
+                    image = cv2.resize(image, (new_width, new_height))
+                
+                # Get face encoding
+                face_encodings = face_recognition.face_encodings(image)
+                
+                if len(face_encodings) > 0:
+                    student_encodings.append(face_encodings[0])
+                    student_names.append(os.path.splitext(filename)[0])
+                    st.success(f"✓ Processed: {filename}")
+                else:
+                    st.warning(f"⚠ No face detected in {filename}")
             
-            # Get face encoding
-            face_encodings = face_recognition.face_encodings(image)
-            
-            if len(face_encodings) > 0:
-                student_encodings.append(face_encodings[0])
-                student_names.append(os.path.splitext(filename)[0])
-                st.success(f"✓ Processed: {filename}")
-            else:
-                st.warning(f"⚠ No face detected in {filename}")
+            except Exception as e:
+                st.error(f"Error processing {filename}: {str(e)}")
             
             progress_bar.progress((idx + 1) / len(image_files))
         
@@ -92,13 +119,24 @@ def train_model(images_folder):
 
 def recognize_faces(image, student_encodings, student_names, tolerance=0.6):
     """Recognize faces in the uploaded image"""
+    if not FACE_RECOGNITION_AVAILABLE:
+        st.error("Face recognition library is not available")
+        return [], []
+    
     try:
         # Convert PIL image to numpy array if needed
         if isinstance(image, Image.Image):
             image = np.array(image)
         
+        # Convert BGR to RGB if needed (OpenCV uses BGR)
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            # Check if it's BGR (common from OpenCV)
+            if image[0,0,0] > image[0,0,2]:  # Simple heuristic
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
         # Resize for faster processing
-        small_frame = cv2.resize(image, (0, 0), fx=0.5, fy=0.5)
+        scale_factor = 0.5
+        small_frame = cv2.resize(image, (0, 0), fx=scale_factor, fy=scale_factor)
         
         # Find face locations
         face_locations = face_recognition.face_locations(small_frame)
@@ -107,7 +145,8 @@ def recognize_faces(image, student_encodings, student_names, tolerance=0.6):
             return [], []
         
         # Scale back face locations
-        face_locations = [(top*2, right*2, bottom*2, left*2) 
+        face_locations = [(int(top/scale_factor), int(right/scale_factor), 
+                          int(bottom/scale_factor), int(left/scale_factor)) 
                          for top, right, bottom, left in face_locations]
         
         # Get face encodings
@@ -151,11 +190,11 @@ def draw_boxes(image, names, locations):
         
         # Draw label background
         label_bg = cv2.getTextSize(name, cv2.FONT_HERSHEY_DUPLEX, 0.6, 1)[0]
-        cv2.rectangle(img_copy, (left, bottom - 20), 
-                     (left + label_bg[0], bottom), (0, 255, 0), -1)
+        cv2.rectangle(img_copy, (left, bottom - 25), 
+                     (left + label_bg[0] + 10, bottom), (0, 255, 0), -1)
         
         # Draw label text
-        cv2.putText(img_copy, name, (left, bottom - 5),
+        cv2.putText(img_copy, name, (left + 5, bottom - 8),
                    cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
     
     return img_copy
@@ -181,17 +220,23 @@ if option == "Train Model":
     st.header("🎓 Train Face Recognition Model")
     st.markdown("Upload student images or specify folder path")
     
+    if not FACE_RECOGNITION_AVAILABLE:
+        st.error("⚠️ Face recognition library is not available. Please check the installation.")
+        st.stop()
+    
     col1, col2 = st.columns(2)
     
     with col1:
         uploaded_files = st.file_uploader(
             "Upload student images (jpg, jpeg, png)",
             type=['jpg', 'jpeg', 'png'],
-            accept_multiple_files=True
+            accept_multiple_files=True,
+            help="Upload clear, front-facing photos of students"
         )
     
     with col2:
-        folder_path = st.text_input("Or enter Google Drive/Colab folder path:")
+        folder_path = st.text_input("Or enter folder path (for deployed version):", 
+                                   help="Example: /mount/src/your-repo/images")
     
     if st.button("🚀 Train Model", type="primary"):
         if uploaded_files:
@@ -233,14 +278,23 @@ if option == "Train Model":
 elif option == "Take Attendance":
     st.header("📸 Take Attendance")
     
+    if not FACE_RECOGNITION_AVAILABLE:
+        st.error("⚠️ Face recognition library is not available. Please check the installation.")
+        st.stop()
+    
     # Check if model is trained
     if not st.session_state.model_trained:
         # Try to load existing model
         if os.path.exists('trained_model.pickle'):
-            with open('trained_model.pickle', 'rb') as f:
-                st.session_state.student_encodings, st.session_state.student_names = pickle.load(f)
-                st.session_state.model_trained = True
-                st.success("Existing model loaded successfully!")
+            try:
+                with open('trained_model.pickle', 'rb') as f:
+                    st.session_state.student_encodings, st.session_state.student_names = pickle.load(f)
+                    st.session_state.model_trained = True
+                    st.success("Existing model loaded successfully!")
+            except Exception as e:
+                st.error(f"Error loading model: {str(e)}")
+                st.warning("⚠ No valid trained model found! Please train the model first.")
+                st.stop()
         else:
             st.warning("⚠ No trained model found! Please train the model first.")
             st.stop()
@@ -279,12 +333,15 @@ elif option == "Take Attendance":
             # Filter out "Unknown"
             recognized_names_unique = [name for name in recognized_names_unique if name != "Unknown"]
             
-            # Draw boxes on image
-            annotated_image = draw_boxes(image_np, recognized_names, face_locations)
-            
-            # Display annotated image
-            with col2:
-                st.image(annotated_image, caption="Recognized Faces", use_column_width=True)
+            if len(face_locations) > 0:
+                # Draw boxes on image
+                annotated_image = draw_boxes(image_np, recognized_names, face_locations)
+                
+                # Display annotated image
+                with col2:
+                    st.image(annotated_image, caption="Recognized Faces", use_column_width=True)
+            else:
+                st.warning("No faces detected in the image. Please try another photo.")
             
             # Generate attendance
             attendance_df = mark_attendance(
@@ -301,13 +358,14 @@ elif option == "Take Attendance":
             total_count = len(st.session_state.student_names)
             absent_count = total_count - present_count
             
-            col3, col4, col5 = st.columns(3)
-            with col3:
-                st.metric("✅ Present", present_count)
-            with col4:
-                st.metric("❌ Absent", absent_count)
-            with col5:
-                st.metric("📊 Attendance %", f"{(present_count/total_count)*100:.1f}%")
+            if total_count > 0:
+                col3, col4, col5 = st.columns(3)
+                with col3:
+                    st.metric("✅ Present", present_count)
+                with col4:
+                    st.metric("❌ Absent", absent_count)
+                with col5:
+                    st.metric("📊 Attendance %", f"{(present_count/total_count)*100:.1f}%")
             
             # Save attendance to CSV
             csv_filename = f"attendance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -361,4 +419,19 @@ elif option == "View Attendance Records":
 
 # Footer
 st.markdown("---")
-st.markdown("💡 **Tip:** Make sure student images are clear and well-lit for better recognition accuracy.")
+st.markdown("💡 **Tips for better accuracy:**")
+st.markdown("""
+- Use clear, front-facing photos for training
+- Ensure good lighting in group photos
+- Faces should be clearly visible and not too small
+- For best results, use photos with faces looking directly at the camera
+""")
+
+# Add a requirements checker in sidebar
+with st.sidebar.expander("ℹ️ System Info"):
+    st.write(f"Python Version: {sys.version}")
+    st.write(f"Face Recognition Available: {FACE_RECOGNITION_AVAILABLE}")
+    if FACE_RECOGNITION_AVAILABLE:
+        st.write("✅ All dependencies loaded successfully")
+    else:
+        st.write("❌ Some dependencies missing")
